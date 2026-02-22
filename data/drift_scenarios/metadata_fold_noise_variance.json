@@ -1,0 +1,15 @@
+{
+  "n_realizations": 100,
+  "length": 2500,
+  "dynamics_type": "fold",
+  "drift_config": {
+    "type": "noise_variance",
+    "start": 500,
+    "end": 1000,
+    "params": {
+      "initial_std": 0.1,
+      "final_std": 0.3
+    }
+  },
+  "seed": 42
+}

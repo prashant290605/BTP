@@ -1,0 +1,15 @@
+{
+  "n_realizations": 100,
+  "length": 2500,
+  "dynamics_type": "fold",
+  "drift_config": {
+    "type": "scale",
+    "start": 500,
+    "end": 1000,
+    "params": {
+      "initial_scale": 1.0,
+      "final_scale": 1.5
+    }
+  },
+  "seed": 42
+}

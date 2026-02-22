@@ -1,0 +1,7 @@
+{
+  "n_realizations": 100,
+  "length": 2500,
+  "dynamics_type": "saddle_node",
+  "drift_config": null,
+  "seed": 42
+}

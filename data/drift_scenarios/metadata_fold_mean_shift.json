@@ -1,0 +1,14 @@
+{
+  "n_realizations": 100,
+  "length": 2500,
+  "dynamics_type": "fold",
+  "drift_config": {
+    "type": "mean_shift",
+    "start": 500,
+    "end": 1000,
+    "params": {
+      "shift_amount": 0.5
+    }
+  },
+  "seed": 42
+}
