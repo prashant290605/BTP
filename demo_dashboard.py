@@ -329,6 +329,18 @@ def normalize_for_eval(scores: np.ndarray) -> np.ndarray:
     return s
 
 
+def deep_model_runtime_status() -> Tuple[bool, str]:
+    model_path = Path("models/cnn_lstm_offline.keras")
+    norm_path = Path("models/cnn_lstm_offline_norm.json")
+    if not model_path.exists() or not norm_path.exists():
+        return False, "model files missing in models/."
+    try:
+        import tensorflow as _tf  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        return False, f"tensorflow unavailable ({exc})"
+    return True, ""
+
+
 # ---------------------- Sidebar ----------------------
 st.title("Interactive EWS + Drift Demonstration Dashboard")
 st.caption("Synthetic Drift -> Drift Metrics -> Drift Detection -> Model Warning Scores -> EWS Metrics")
@@ -512,6 +524,12 @@ st.divider()
 
 # ---------------------- Panel 4: EWS metrics + method comparison ----------------------
 st.subheader("4) Early Warning Evaluation Metrics")
+deep_ok, deep_msg = deep_model_runtime_status()
+if not deep_ok:
+    st.info(
+        "Offline/Online CNN-LSTM methods are disabled in this runtime: "
+        f"{deep_msg} Classical EWS remains fully available."
+    )
 
 methods_to_compute = (
     ["Classical EWS", "Offline CNN-LSTM", "Online Adaptive CNN-LSTM"]
