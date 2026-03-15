@@ -68,14 +68,15 @@ def evaluate_online_adaptive(
             continue
         
         # Reset model state for new sample (but reuse loaded model)
-        online_model.drift_detector.score_buffer.clear()
-        online_model.drift_detector.initialized = False
-        online_model.buffer.windows.clear()
-        online_model.buffer.labels.clear()
-        online_model.current_step = 0
-        online_model.last_adaptation_step = -online_model.cooldown_period
-        online_model.adaptation_count = 0
-        online_model.adaptation_points = []
+        if hasattr(online_model, "reset_stream_state"):
+            online_model.reset_stream_state()
+        else:
+            online_model.buffer.windows.clear()
+            online_model.buffer.labels.clear()
+            online_model.current_step = 0
+            online_model.last_adaptation_step = -online_model.cooldown_period
+            online_model.adaptation_count = 0
+            online_model.adaptation_points = []
         
         # Reload original model weights (reset adaptations)
         online_model.model.load_weights(model_path.replace('.keras', '_weights.h5') 

@@ -1,9 +1,9 @@
 """
-Online Adaptive CNN-LSTM Early Warning System
+Online Adaptive CNN-LSTM Early Warning System.
 
 Features:
 - Streaming inference (one window at a time)
-- Unsupervised drift detection (score variance monitoring)
+- Pluggable drift detection (variance / ADWIN / CUSUM / Page-Hinkley)
 - Selective fine-tuning on recent data
 - Stability controls (cooldown, limited epochs)
 """
@@ -14,67 +14,11 @@ from tensorflow import keras
 from collections import deque
 import json
 import os
+from .drift_detectors import BaseDriftDetector, VarianceDriftDetector, create_drift_detector
 
 
-class DriftDetector:
-    """
-    Unsupervised drift detector based on prediction score statistics.
-    
-    Monitors variance of prediction scores to detect distribution shifts.
-    """
-    
-    def __init__(self, threshold=2.5, window_size=100):
-        """
-        Initialize drift detector.
-        
-        Args:
-            threshold: Variance multiplier for drift detection
-            window_size: Window size for recent statistics
-        """
-        self.threshold = threshold
-        self.window_size = window_size
-        self.baseline_var = None
-        self.baseline_mean = None
-        self.score_buffer = deque(maxlen=1000)
-        self.initialized = False
-    
-    def update(self, score):
-        """Add new prediction score to buffer."""
-        self.score_buffer.append(score)
-    
-    def detect(self):
-        """
-        Detect drift based on score variance.
-        
-        Returns:
-            True if drift detected, False otherwise
-        """
-        if len(self.score_buffer) < self.window_size:
-            return False
-        
-        # Get recent scores
-        recent_scores = list(self.score_buffer)[-self.window_size:]
-        recent_var = np.var(recent_scores)
-        recent_mean = np.mean(recent_scores)
-        
-        # Initialize baseline
-        if not self.initialized:
-            self.baseline_var = recent_var
-            self.baseline_mean = recent_mean
-            self.initialized = True
-            return False
-        
-        # Detect drift via variance spike
-        variance_drift = recent_var > self.threshold * self.baseline_var
-        
-        return variance_drift
-    
-    def reset_baseline(self):
-        """Reset baseline statistics after adaptation."""
-        if len(self.score_buffer) >= self.window_size:
-            recent_scores = list(self.score_buffer)[-self.window_size:]
-            self.baseline_var = np.var(recent_scores)
-            self.baseline_mean = np.mean(recent_scores)
+# Backward-compatible alias for existing imports.
+DriftDetector = VarianceDriftDetector
 
 
 class RollingBuffer:
@@ -133,6 +77,9 @@ class OnlineAdaptiveCNNLSTM:
         norm_std,
         window_size=100,
         drift_threshold=2.5,
+        drift_detector: BaseDriftDetector | None = None,
+        detector_type: str = "variance",
+        detector_params: dict | None = None,
         adaptation_windows=250,
         adaptation_epochs=3,
         cooldown_period=200
@@ -145,7 +92,10 @@ class OnlineAdaptiveCNNLSTM:
             norm_mean: Normalization mean
             norm_std: Normalization std
             window_size: Input window size
-            drift_threshold: Drift detection threshold
+            drift_threshold: Legacy threshold for variance detector
+            drift_detector: Optional preconstructed detector (highest priority)
+            detector_type: Detector name for factory creation
+            detector_params: Parameters passed to detector factory
             adaptation_windows: Number of recent windows for adaptation
             adaptation_epochs: Epochs for fine-tuning
             cooldown_period: Steps between adaptations
@@ -158,11 +108,16 @@ class OnlineAdaptiveCNNLSTM:
         self.norm_mean = norm_mean
         self.norm_std = norm_std
         
-        # Drift detection
-        self.drift_detector = DriftDetector(
-            threshold=drift_threshold,
-            window_size=100
-        )
+        # Drift detection (pluggable)
+        if drift_detector is not None:
+            self.drift_detector = drift_detector
+        else:
+            detector_params = detector_params or {}
+            if detector_type == "variance":
+                # Preserve legacy default behavior.
+                detector_params.setdefault("threshold", drift_threshold)
+                detector_params.setdefault("window_size", 100)
+            self.drift_detector = create_drift_detector(detector_type, **detector_params)
         
         # Buffer
         self.buffer = RollingBuffer(maxlen=1000)
@@ -238,7 +193,8 @@ class OnlineAdaptiveCNNLSTM:
         self.adaptation_points.append(self.current_step)
         
         # Reset drift detector baseline
-        self.drift_detector.reset_baseline()
+        if hasattr(self.drift_detector, "reset_baseline"):
+            self.drift_detector.reset_baseline()
     
     def process_stream(self, time_series, labels):
         """
@@ -281,10 +237,12 @@ class OnlineAdaptiveCNNLSTM:
             self.buffer.add(window_norm, label)
             
             # Update drift detector (UNSUPERVISED - uses score only)
-            self.drift_detector.update(score)
-            
+            drift_flag = self.drift_detector.update(score)
+            if drift_flag is None and hasattr(self.drift_detector, "detect"):
+                drift_flag = self.drift_detector.detect()
+
             # Check for drift and adapt if needed
-            if self.drift_detector.detect() and self.can_adapt():
+            if bool(drift_flag) and self.can_adapt():
                 self.adapt_model()
                 # Note: Adaptation affects model state for NEXT sample
                 # Current sample scores remain unchanged (realistic streaming)
@@ -298,13 +256,27 @@ class OnlineAdaptiveCNNLSTM:
         return {
             'adaptation_count': self.adaptation_count,
             'adaptation_points': self.adaptation_points,
-            'buffer_size': len(self.buffer)
+            'buffer_size': len(self.buffer),
+            'detector_state': self.drift_detector.get_state()
         }
+
+    def reset_stream_state(self):
+        """Reset stream/adaptation state for a new sample stream."""
+        if hasattr(self.drift_detector, "reset"):
+            self.drift_detector.reset()
+        self.buffer.windows.clear()
+        self.buffer.labels.clear()
+        self.current_step = 0
+        self.last_adaptation_step = -self.cooldown_period
+        self.adaptation_count = 0
+        self.adaptation_points = []
 
 
 def load_online_adaptive_model(
     model_path="models/cnn_lstm_offline.keras",
-    norm_path="models/cnn_lstm_offline_norm.json"
+    norm_path="models/cnn_lstm_offline_norm.json",
+    detector_type="variance",
+    detector_params=None,
 ):
     """
     Load online adaptive model from offline trained model.
@@ -312,6 +284,8 @@ def load_online_adaptive_model(
     Args:
         model_path: Path to offline model
         norm_path: Path to normalization parameters
+        detector_type: Drift detector name
+        detector_params: Drift detector parameters
         
     Returns:
         OnlineAdaptiveCNNLSTM instance
@@ -327,6 +301,8 @@ def load_online_adaptive_model(
         norm_std=norm_params['std'],
         window_size=100,
         drift_threshold=2.5,
+        detector_type=detector_type,
+        detector_params=detector_params,
         adaptation_windows=250,
         adaptation_epochs=3,
         cooldown_period=200

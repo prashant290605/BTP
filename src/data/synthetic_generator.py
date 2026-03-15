@@ -1,143 +1,177 @@
 """
-Synthetic Time Series Generator for Early Warning System
+Synthetic Time Series Generator for Early Warning System.
 
-This module generates synthetic time series with:
-1. Stable regime - Normal dynamics before transition
-2. Gradual approach to critical transition - Warning phase
-3. Post-transition regime - New stable state after structural change
+This module generates synthetic time series with three phases:
+1. Stable regime
+2. Approaching transition
+3. Post-transition regime
 
-Optional concept drift mechanisms:
-- Noise variance drift
-- Mean shift without collapse
-- Scale changes
+It supports modular concept drift injections:
+- Mean drift
+- Variance drift
+- Noise drift
+- Autocorrelation drift
+- Control parameter drift
 """
 
-import numpy as np
-import pandas as pd
 from pathlib import Path
-from typing import Tuple, Optional, Dict
+from typing import Dict, Optional, Tuple
 import json
+
+import numpy as np
 
 
 class SyntheticTimeSeriesGenerator:
     """
-    Generates synthetic time series with structural transitions.
-    
-    The generator uses a fold bifurcation model where the system
-    gradually loses stability before transitioning to a new state.
+    Generates synthetic time series with structural transitions and drift.
     """
-    
+
     def __init__(self, seed: Optional[int] = None):
-        """
-        Initialize the generator.
-        
-        Args:
-            seed: Random seed for reproducibility
-        """
         if seed is not None:
             np.random.seed(seed)
         self.seed = seed
-    
+
+    # ---------------------------------------------------------------------
+    # Shared drift utilities
+    # ---------------------------------------------------------------------
+    @staticmethod
+    def _ramp(t: int, start: int, end: int, power: float = 1.0) -> float:
+        """
+        Shared ramp(t) in [0, 1] controlling gradual drift progression.
+        """
+        if end <= start:
+            return 1.0 if t >= start else 0.0
+        progress = (t - start) / float(end - start)
+        progress = float(np.clip(progress, 0.0, 1.0))
+        return progress**power
+
+    @staticmethod
+    def _resolve_magnitude(drift_config: Optional[Dict], params: Dict) -> float:
+        """
+        Resolve drift magnitude with backward compatibility.
+        """
+        if drift_config is None:
+            return 1.0
+        if "magnitude" in drift_config:
+            return float(drift_config["magnitude"])
+        if "magnitude" in params:
+            return float(params["magnitude"])
+        return 1.0
+
+    def _apply_control_parameter_drift(
+        self,
+        base_r: float,
+        t: int,
+        start: int,
+        end: int,
+        magnitude: float = 1.0,
+        shift_amount: float = 0.2,
+        direction: float = 1.0,
+        power: float = 1.0,
+    ) -> float:
+        """
+        Add gradual drift directly to control parameter r(t).
+        """
+        delta_r = direction * shift_amount * magnitude * self._ramp(t, start, end, power)
+        return base_r + delta_r
+
+    # ---------------------------------------------------------------------
+    # Dynamical systems
+    # ---------------------------------------------------------------------
     def generate_fold_bifurcation(
         self,
         length: int = 2500,
         stable_length: int = 1000,
         transition_length: int = 800,
         dt: float = 0.01,
-        noise_std: float = 0.05
+        noise_std: float = 0.05,
+        control_drift_config: Optional[Dict] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Generate time series using fold bifurcation dynamics.
-        
-        Model: dx/dt = r(t) - x^2 - gamma*x^4 + noise
-        where r(t) decreases slowly from positive to near zero,
-        causing the system to approach a critical transition (fold bifurcation).
-        
-        Args:
-            length: Total time series length
-            stable_length: Length of stable regime
-            transition_length: Length of gradual approach to transition
-            dt: Time step (default 0.01 for numerical stability)
-            noise_std: Standard deviation of noise (default 0.05)
-            
-        Returns:
-            time_series: Generated time series
-            labels: Phase labels (0=stable, 1=approaching, 2=post-transition)
+        Fold bifurcation:
+            dx/dt = r(t) - x^2 - gamma*x^4 + noise
         """
         time_series = np.zeros(length)
         labels = np.zeros(length, dtype=int)
-        
-        # Control parameter schedule: decreasing from r0 to r_end
+
         r0 = 1.0
         r_end = -0.2
         r_schedule = np.linspace(r0, r_end, length)
-        
-        # Initial condition: equilibrium at r0
         x = np.sqrt(r0)
-        
-        # Soft confining parameter
         gamma = 0.001
-        
+
+        if control_drift_config is not None:
+            d_start = control_drift_config.get("start", length // 4)
+            d_end = control_drift_config.get("end", length // 2)
+            d_params = control_drift_config.get("params", {})
+            d_mag = self._resolve_magnitude(control_drift_config, d_params)
+        else:
+            d_start = d_end = 0
+            d_params = {}
+            d_mag = 0.0
+
         for i in range(length):
-            # Determine regime labels based on time
             if i < stable_length:
-                labels[i] = 0  # Stable regime
+                labels[i] = 0
             elif i < stable_length + transition_length:
-                labels[i] = 1  # Approaching transition
+                labels[i] = 1
             else:
-                labels[i] = 2  # Post-transition
-            
-            # Get current control parameter
-            r = r_schedule[i]
-            
-            # Fold bifurcation dynamics: dx/dt = r - x^2 - gamma*x^4
+                labels[i] = 2
+
+            r = float(r_schedule[i])
+            if control_drift_config is not None:
+                r = self._apply_control_parameter_drift(
+                    base_r=r,
+                    t=i,
+                    start=d_start,
+                    end=d_end,
+                    magnitude=d_mag,
+                    shift_amount=d_params.get("shift_amount", 0.2),
+                    direction=d_params.get("direction", 1.0),
+                    power=d_params.get("power", 1.0),
+                )
+
             dx = (r - x**2 - gamma * x**4) * dt + noise_std * np.sqrt(dt) * np.random.randn()
             x = x + dx
-            
-            # Numerical guard: terminate if trajectory diverges
+
             if np.abs(x) > 10.0:
-                # Fill remaining with NaN and break
                 time_series[i:] = np.nan
                 break
-            
             time_series[i] = x
-        
+
         return time_series, labels
 
-    
     def generate_saddle_node(
         self,
         length: int = 2500,
         stable_length: int = 1000,
         transition_length: int = 800,
         dt: float = 0.1,
-        noise_std: float = 0.1
+        noise_std: float = 0.1,
+        control_drift_config: Optional[Dict] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Generate time series using saddle-node bifurcation.
-        
-        Model: dx/dt = r + x - x^3 + noise
-        
-        Args:
-            length: Total time series length
-            stable_length: Length of stable regime
-            transition_length: Length of gradual approach to transition
-            dt: Time step
-            noise_std: Standard deviation of noise
-            
-        Returns:
-            time_series: Generated time series
-            labels: Phase labels (0=stable, 1=approaching, 2=post-transition)
+        Saddle-node bifurcation:
+            dx/dt = r + x - x^3 + noise
         """
         time_series = np.zeros(length)
         labels = np.zeros(length, dtype=int)
-        
-        x = -1.0  # Initial condition
-        
+        x = -1.0
+
         r_stable = -0.3
         r_critical = 0.0
         r_post = 0.5
-        
+
+        if control_drift_config is not None:
+            d_start = control_drift_config.get("start", length // 4)
+            d_end = control_drift_config.get("end", length // 2)
+            d_params = control_drift_config.get("params", {})
+            d_mag = self._resolve_magnitude(control_drift_config, d_params)
+        else:
+            d_start = d_end = 0
+            d_params = {}
+            d_mag = 0.0
+
         for i in range(length):
             if i < stable_length:
                 r = r_stable
@@ -149,52 +183,58 @@ class SyntheticTimeSeriesGenerator:
             else:
                 r = r_post
                 labels[i] = 2
-            
-            # Saddle-node dynamics
+
+            if control_drift_config is not None:
+                r = self._apply_control_parameter_drift(
+                    base_r=r,
+                    t=i,
+                    start=d_start,
+                    end=d_end,
+                    magnitude=d_mag,
+                    shift_amount=d_params.get("shift_amount", 0.15),
+                    direction=d_params.get("direction", 1.0),
+                    power=d_params.get("power", 1.0),
+                )
+
             dx = (r + x - x**3) * dt + noise_std * np.sqrt(dt) * np.random.randn()
             x = x + dx
-            # Numerical stability: clip to prevent blow-up
             x = np.clip(x, -5.0, 5.0)
             time_series[i] = x
-        
+
         return time_series, labels
-    
+
     def generate_hopf_bifurcation(
         self,
         length: int = 2500,
         stable_length: int = 1000,
         transition_length: int = 800,
         dt: float = 0.05,
-        noise_std: float = 0.05
+        noise_std: float = 0.05,
+        control_drift_config: Optional[Dict] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Generate time series using Hopf bifurcation (oscillatory transition).
-        
-        Model: dx/dt = r*x - y - x*(x^2 + y^2)
-               dy/dt = x + r*y - y*(x^2 + y^2)
-        
-        Returns only x component as the time series.
-        
-        Args:
-            length: Total time series length
-            stable_length: Length of stable regime
-            transition_length: Length of gradual approach to transition
-            dt: Time step
-            noise_std: Standard deviation of noise
-            
-        Returns:
-            time_series: Generated time series (x component)
-            labels: Phase labels (0=stable, 1=approaching, 2=post-transition)
+        Hopf bifurcation:
+            dx/dt = r*x - y - x*(x^2 + y^2)
+            dy/dt = x + r*y - y*(x^2 + y^2)
         """
         time_series = np.zeros(length)
         labels = np.zeros(length, dtype=int)
-        
-        x, y = 0.1, 0.1  # Initial conditions
-        
+        x, y = 0.1, 0.1
+
         r_stable = -0.5
         r_critical = 0.0
         r_post = 0.3
-        
+
+        if control_drift_config is not None:
+            d_start = control_drift_config.get("start", length // 4)
+            d_end = control_drift_config.get("end", length // 2)
+            d_params = control_drift_config.get("params", {})
+            d_mag = self._resolve_magnitude(control_drift_config, d_params)
+        else:
+            d_start = d_end = 0
+            d_params = {}
+            d_mag = 0.0
+
         for i in range(length):
             if i < stable_length:
                 r = r_stable
@@ -206,148 +246,202 @@ class SyntheticTimeSeriesGenerator:
             else:
                 r = r_post
                 labels[i] = 2
-            
-            # Hopf bifurcation dynamics
+
+            if control_drift_config is not None:
+                r = self._apply_control_parameter_drift(
+                    base_r=r,
+                    t=i,
+                    start=d_start,
+                    end=d_end,
+                    magnitude=d_mag,
+                    shift_amount=d_params.get("shift_amount", 0.12),
+                    direction=d_params.get("direction", 1.0),
+                    power=d_params.get("power", 1.0),
+                )
+
             r_sq = x**2 + y**2
             dx = (r * x - y - x * r_sq) * dt + noise_std * np.sqrt(dt) * np.random.randn()
             dy = (x + r * y - y * r_sq) * dt + noise_std * np.sqrt(dt) * np.random.randn()
-            
-            x = x + dx
-            y = y + dy
-            # Numerical stability: clip to prevent blow-up
-            x = np.clip(x, -5.0, 5.0)
-            y = np.clip(y, -5.0, 5.0)
+            x = np.clip(x + dx, -5.0, 5.0)
+            y = np.clip(y + dy, -5.0, 5.0)
             time_series[i] = x
-        
+
         return time_series, labels
-    
+
+    # ---------------------------------------------------------------------
+    # Modular drift injections (post-generation)
+    # ---------------------------------------------------------------------
+    def add_mean_drift(
+        self,
+        time_series: np.ndarray,
+        drift_start: int,
+        drift_end: int,
+        magnitude: float = 1.0,
+        shift_amount: float = 0.5,
+        power: float = 1.0,
+    ) -> np.ndarray:
+        """
+        Mean drift:
+            x_t <- x_t + ramp(t) * (magnitude * shift_amount)
+        """
+        ts = time_series.copy()
+        total_shift = magnitude * shift_amount
+
+        for i in range(drift_start, len(ts)):
+            ts[i] += self._ramp(i, drift_start, drift_end, power) * total_shift
+
+        return ts
+
+    def add_variance_drift(
+        self,
+        time_series: np.ndarray,
+        drift_start: int,
+        drift_end: int,
+        magnitude: float = 1.0,
+        initial_scale: float = 1.0,
+        final_scale: float = 1.5,
+        power: float = 1.0,
+    ) -> np.ndarray:
+        """
+        Variance drift:
+            x_t <- mu + s(t) * (x_t - mu)
+        """
+        ts = time_series.copy()
+        ref_mean = float(np.mean(ts[:max(drift_start, 1)]))
+        target_scale = initial_scale + magnitude * (final_scale - initial_scale)
+
+        for i in range(drift_start, len(ts)):
+            ramp_val = self._ramp(i, drift_start, drift_end, power)
+            scale_t = initial_scale + ramp_val * (target_scale - initial_scale)
+            ts[i] = ref_mean + (ts[i] - ref_mean) * scale_t
+
+        return ts
+
+    def add_noise_drift(
+        self,
+        time_series: np.ndarray,
+        drift_start: int,
+        drift_end: int,
+        magnitude: float = 1.0,
+        initial_std: float = 0.1,
+        final_std: float = 0.3,
+        power: float = 1.0,
+    ) -> np.ndarray:
+        """
+        Noise drift:
+            x_t <- x_t + epsilon_t, epsilon_t ~ N(0, sigma(t)^2)
+        """
+        ts = time_series.copy()
+        target_std = initial_std + magnitude * (final_std - initial_std)
+
+        for i in range(drift_start, len(ts)):
+            ramp_val = self._ramp(i, drift_start, drift_end, power)
+            std_t = initial_std + ramp_val * (target_std - initial_std)
+            ts[i] += std_t * np.random.randn()
+
+        return ts
+
+    def add_autocorrelation_drift(
+        self,
+        time_series: np.ndarray,
+        drift_start: int,
+        drift_end: int,
+        magnitude: float = 1.0,
+        rho_max: float = 0.8,
+        power: float = 1.0,
+    ) -> np.ndarray:
+        """
+        Autocorrelation drift:
+            x_t <- (1-rho(t))*x_t + rho(t)*x_{t-1}
+        """
+        ts = time_series.copy()
+        rho_target = float(np.clip(magnitude * rho_max, 0.0, 0.99))
+        start_idx = max(drift_start, 1)
+
+        for i in range(start_idx, len(ts)):
+            rho_t = self._ramp(i, drift_start, drift_end, power) * rho_target
+            ts[i] = (1.0 - rho_t) * ts[i] + rho_t * ts[i - 1]
+
+        return ts
+
+    # ---------------------------------------------------------------------
+    # Backward-compatible drift wrappers
+    # ---------------------------------------------------------------------
     def add_noise_variance_drift(
         self,
         time_series: np.ndarray,
         drift_start: int,
         drift_end: int,
         initial_std: float = 0.1,
-        final_std: float = 0.3
+        final_std: float = 0.3,
     ) -> np.ndarray:
-        """
-        Add concept drift via changing noise variance.
-        
-        Args:
-            time_series: Original time series
-            drift_start: Start index of drift
-            drift_end: End index of drift
-            initial_std: Initial noise standard deviation
-            final_std: Final noise standard deviation
-            
-        Returns:
-            Modified time series with noise variance drift
-        """
-        ts_drift = time_series.copy()
-        
-        for i in range(drift_start, min(drift_end, len(time_series))):
-            progress = (i - drift_start) / (drift_end - drift_start)
-            current_std = initial_std + progress * (final_std - initial_std)
-            ts_drift[i] += current_std * np.random.randn()
-        
-        # Continue with final std after drift period
-        for i in range(drift_end, len(time_series)):
-            ts_drift[i] += final_std * np.random.randn()
-        
-        return ts_drift
-    
+        return self.add_noise_drift(
+            time_series=time_series,
+            drift_start=drift_start,
+            drift_end=drift_end,
+            magnitude=1.0,
+            initial_std=initial_std,
+            final_std=final_std,
+        )
+
     def add_mean_shift_drift(
         self,
         time_series: np.ndarray,
         drift_start: int,
         drift_end: int,
-        shift_amount: float = 0.5
+        shift_amount: float = 0.5,
     ) -> np.ndarray:
-        """
-        Add concept drift via gradual mean shift.
-        
-        Args:
-            time_series: Original time series
-            drift_start: Start index of drift
-            drift_end: End index of drift
-            shift_amount: Total amount of mean shift
-            
-        Returns:
-            Modified time series with mean shift drift
-        """
-        ts_drift = time_series.copy()
-        
-        for i in range(drift_start, min(drift_end, len(time_series))):
-            progress = (i - drift_start) / (drift_end - drift_start)
-            ts_drift[i] += progress * shift_amount
-        
-        # Apply full shift after drift period
-        ts_drift[drift_end:] += shift_amount
-        
-        return ts_drift
-    
+        return self.add_mean_drift(
+            time_series=time_series,
+            drift_start=drift_start,
+            drift_end=drift_end,
+            magnitude=1.0,
+            shift_amount=shift_amount,
+        )
+
     def add_scale_drift(
         self,
         time_series: np.ndarray,
         drift_start: int,
         drift_end: int,
         initial_scale: float = 1.0,
-        final_scale: float = 1.5
+        final_scale: float = 1.5,
     ) -> np.ndarray:
-        """
-        Add concept drift via changing scale/amplitude.
-        
-        Args:
-            time_series: Original time series
-            drift_start: Start index of drift
-            drift_end: End index of drift
-            initial_scale: Initial scale factor
-            final_scale: Final scale factor
-            
-        Returns:
-            Modified time series with scale drift
-        """
-        ts_drift = time_series.copy()
-        
-        # Calculate mean to preserve it during scaling
-        mean_val = np.mean(time_series[:drift_start])
-        
-        for i in range(drift_start, min(drift_end, len(time_series))):
-            progress = (i - drift_start) / (drift_end - drift_start)
-            current_scale = initial_scale + progress * (final_scale - initial_scale)
-            ts_drift[i] = mean_val + (ts_drift[i] - mean_val) * current_scale
-        
-        # Apply final scale after drift period
-        for i in range(drift_end, len(time_series)):
-            ts_drift[i] = mean_val + (ts_drift[i] - mean_val) * final_scale
-        
-        return ts_drift
-    
+        return self.add_variance_drift(
+            time_series=time_series,
+            drift_start=drift_start,
+            drift_end=drift_end,
+            magnitude=1.0,
+            initial_scale=initial_scale,
+            final_scale=final_scale,
+        )
+
+    # ---------------------------------------------------------------------
+    # Dataset generation
+    # ---------------------------------------------------------------------
     def generate_dataset(
         self,
         n_realizations: int = 100,
         length: int = 2500,
         output_dir: str = "data/raw",
         dynamics_type: str = "fold",
-        drift_config: Optional[Dict] = None
+        drift_config: Optional[Dict] = None,
     ) -> None:
         """
         Generate multiple realizations and save to disk.
-        
-        Args:
-            n_realizations: Number of time series to generate
-            length: Length of each time series
-            output_dir: Directory to save data
-            dynamics_type: Type of dynamics ('fold', 'saddle_node', 'hopf')
-            drift_config: Optional drift configuration dict with keys:
-                - type: 'noise_variance', 'mean_shift', or 'scale'
-                - start: drift start index
-                - end: drift end index
-                - params: dict of drift-specific parameters
+
+        drift_config keys:
+            - type:
+                new: 'mean', 'variance', 'noise', 'autocorrelation', 'control_parameter'
+                legacy: 'mean_shift', 'scale', 'noise_variance'
+            - magnitude: scalar severity (default 1.0)
+            - start: drift start index
+            - end: drift end index
+            - params: drift-specific parameters
         """
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
-        
-        # Select generator function
+
         if dynamics_type == "fold":
             generator_func = self.generate_fold_bifurcation
         elif dynamics_type == "saddle_node":
@@ -356,133 +450,171 @@ class SyntheticTimeSeriesGenerator:
             generator_func = self.generate_hopf_bifurcation
         else:
             raise ValueError(f"Unknown dynamics type: {dynamics_type}")
-        
+
+        drift_type = None
+        drift_start = length // 4
+        drift_end = length // 2
+        params: Dict = {}
+        magnitude = 1.0
+
+        if drift_config is not None:
+            drift_type = drift_config.get("type")
+            drift_start = drift_config.get("start", drift_start)
+            drift_end = drift_config.get("end", drift_end)
+            params = drift_config.get("params", {})
+            magnitude = self._resolve_magnitude(drift_config, params)
+
+        drift_aliases = {
+            "mean_shift": "mean",
+            "noise_variance": "noise",
+            "scale": "variance",
+            "control_param": "control_parameter",
+        }
+        normalized_drift_type = drift_aliases.get(drift_type, drift_type)
+
         all_series = []
         all_labels = []
-        
-        for i in range(n_realizations):
-            # Generate base time series
-            ts, labels = generator_func(length=length)
-            
-            # Apply drift if configured
-            if drift_config is not None:
-                drift_type = drift_config.get('type')
-                drift_start = drift_config.get('start', length // 4)
-                drift_end = drift_config.get('end', length // 2)
-                params = drift_config.get('params', {})
-                
-                if drift_type == 'noise_variance':
-                    ts = self.add_noise_variance_drift(
-                        ts, drift_start, drift_end, **params
-                    )
-                elif drift_type == 'mean_shift':
-                    ts = self.add_mean_shift_drift(
-                        ts, drift_start, drift_end, **params
-                    )
-                elif drift_type == 'scale':
-                    ts = self.add_scale_drift(
-                        ts, drift_start, drift_end, **params
-                    )
-            
+
+        for _ in range(n_realizations):
+            control_drift = None
+            if normalized_drift_type == "control_parameter" and drift_config is not None:
+                control_drift = {
+                    "start": drift_start,
+                    "end": drift_end,
+                    "magnitude": magnitude,
+                    "params": params,
+                }
+
+            ts, labels = generator_func(length=length, control_drift_config=control_drift)
+
+            if normalized_drift_type == "mean":
+                ts = self.add_mean_drift(
+                    ts,
+                    drift_start,
+                    drift_end,
+                    magnitude=magnitude,
+                    shift_amount=params.get("shift_amount", 0.5),
+                    power=params.get("power", 1.0),
+                )
+            elif normalized_drift_type == "variance":
+                ts = self.add_variance_drift(
+                    ts,
+                    drift_start,
+                    drift_end,
+                    magnitude=magnitude,
+                    initial_scale=params.get("initial_scale", 1.0),
+                    final_scale=params.get("final_scale", 1.5),
+                    power=params.get("power", 1.0),
+                )
+            elif normalized_drift_type == "noise":
+                ts = self.add_noise_drift(
+                    ts,
+                    drift_start,
+                    drift_end,
+                    magnitude=magnitude,
+                    initial_std=params.get("initial_std", 0.1),
+                    final_std=params.get("final_std", 0.3),
+                    power=params.get("power", 1.0),
+                )
+            elif normalized_drift_type == "autocorrelation":
+                ts = self.add_autocorrelation_drift(
+                    ts,
+                    drift_start,
+                    drift_end,
+                    magnitude=magnitude,
+                    rho_max=params.get("rho_max", 0.8),
+                    power=params.get("power", 1.0),
+                )
+            elif normalized_drift_type == "control_parameter":
+                # Applied inside generator dynamics.
+                pass
+            elif normalized_drift_type is not None:
+                raise ValueError(f"Unknown drift type: {drift_type}")
+
             all_series.append(ts)
             all_labels.append(labels)
-        
-        # Convert to arrays
+
         all_series = np.array(all_series)
         all_labels = np.array(all_labels)
-        
-        # Save data
-        drift_suffix = f"_{drift_config['type']}" if drift_config else ""
+
+        drift_suffix = f"_{drift_type}" if drift_type else ""
         np.save(output_path / f"time_series_{dynamics_type}{drift_suffix}.npy", all_series)
         np.save(output_path / f"labels_{dynamics_type}{drift_suffix}.npy", all_labels)
-        
-        # Save metadata
+
         metadata = {
-            'n_realizations': n_realizations,
-            'length': length,
-            'dynamics_type': dynamics_type,
-            'drift_config': drift_config,
-            'seed': self.seed
+            "n_realizations": n_realizations,
+            "length": length,
+            "dynamics_type": dynamics_type,
+            "drift_config": drift_config,
+            "seed": self.seed,
         }
-        
-        with open(output_path / f"metadata_{dynamics_type}{drift_suffix}.json", 'w') as f:
+        with open(output_path / f"metadata_{dynamics_type}{drift_suffix}.json", "w") as f:
             json.dump(metadata, f, indent=2)
-        
+
         print(f"Generated {n_realizations} realizations of {dynamics_type} dynamics")
         print(f"Saved to {output_path}")
         print(f"Shape: {all_series.shape}")
 
 
 if __name__ == "__main__":
-    # Example usage
     generator = SyntheticTimeSeriesGenerator(seed=42)
-    
-    # Generate baseline datasets (no drift)
+
     print("Generating baseline datasets...")
     generator.generate_dataset(
         n_realizations=100,
         length=2500,
         output_dir="data/raw",
-        dynamics_type="fold"
+        dynamics_type="fold",
     )
-    
     generator.generate_dataset(
         n_realizations=100,
         length=2500,
         output_dir="data/raw",
-        dynamics_type="saddle_node"
+        dynamics_type="saddle_node",
     )
-    
     generator.generate_dataset(
         n_realizations=100,
         length=2500,
         output_dir="data/raw",
-        dynamics_type="hopf"
+        dynamics_type="hopf",
     )
-    
-    # Generate datasets with concept drift
+
     print("\nGenerating datasets with concept drift...")
-    
-    # Noise variance drift
     generator.generate_dataset(
         n_realizations=100,
         length=2500,
         output_dir="data/drift_scenarios",
         dynamics_type="fold",
         drift_config={
-            'type': 'noise_variance',
-            'start': 500,
-            'end': 1000,
-            'params': {'initial_std': 0.1, 'final_std': 0.3}
-        }
+            "type": "noise_variance",
+            "start": 500,
+            "end": 1000,
+            "params": {"initial_std": 0.1, "final_std": 0.3},
+        },
     )
-    
-    # Mean shift drift
     generator.generate_dataset(
         n_realizations=100,
         length=2500,
         output_dir="data/drift_scenarios",
         dynamics_type="fold",
         drift_config={
-            'type': 'mean_shift',
-            'start': 500,
-            'end': 1000,
-            'params': {'shift_amount': 0.5}
-        }
+            "type": "mean_shift",
+            "start": 500,
+            "end": 1000,
+            "params": {"shift_amount": 0.5},
+        },
     )
-    
-    # Scale drift
     generator.generate_dataset(
         n_realizations=100,
         length=2500,
         output_dir="data/drift_scenarios",
         dynamics_type="fold",
         drift_config={
-            'type': 'scale',
-            'start': 500,
-            'end': 1000,
-            'params': {'initial_scale': 1.0, 'final_scale': 1.5}
-        }
+            "type": "scale",
+            "start": 500,
+            "end": 1000,
+            "params": {"initial_scale": 1.0, "final_scale": 1.5},
+        },
     )
-    
+
     print("\nData generation complete!")
