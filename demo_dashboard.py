@@ -7,13 +7,12 @@ Run:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
-from tensorflow import keras
 
 from src.data.synthetic_generator import SyntheticTimeSeriesGenerator
 from src.evaluation.drift_metrics import compute_all_drift_metrics
@@ -24,7 +23,6 @@ from src.evaluation.ews_metrics import (
 )
 from src.models.classical_ews import ClassicalEWS
 from src.models.drift_detectors import create_drift_detector
-from src.models.online_adaptive_ews import load_online_adaptive_model
 
 
 st.set_page_config(page_title="EWS Drift Demo", layout="wide")
@@ -216,8 +214,9 @@ def run_detector(
 
 
 @st.cache_resource(show_spinner=False)
-def load_offline_model_cached() -> Tuple[keras.Model, float, float, int]:
+def load_offline_model_cached() -> Tuple[Any, float, float, int]:
     import json
+    from tensorflow import keras
 
     model_path = Path("models/cnn_lstm_offline.keras")
     norm_path = Path("models/cnn_lstm_offline_norm.json")
@@ -236,6 +235,8 @@ def load_online_model_cached(
     detector_type: str,
     detector_params_key: Tuple[Tuple[str, object], ...],
 ):
+    from src.models.online_adaptive_ews import load_online_adaptive_model
+
     detector_params = {k: v for k, v in detector_params_key}
     model_path = Path("models/cnn_lstm_offline.keras")
     norm_path = Path("models/cnn_lstm_offline_norm.json")
